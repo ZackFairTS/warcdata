@@ -5,6 +5,7 @@ Parameters:
   AvailabilityZone:
     Type: AWS::EC2::AvailabilityZone::Name
     Description: The Availability Zone to use for the subnets and OpenSearch domain
+    Default: us-east-1a 
 
 Resources:
   # 1. VPC and Networking
