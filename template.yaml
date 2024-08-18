@@ -1,0 +1,277 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template for VPC, S3, OpenSearch, and EC2
+
+Parameters:
+  AvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: The Availability Zone to use for the subnets and OpenSearch domain
+
+Resources:
+  # 1. VPC and Networking
+  AOSWorkshpVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: AOSWorkshpVPC
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref AOSWorkshpVPC
+      AvailabilityZone: !Ref AvailabilityZone
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: Public Subnet
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref AOSWorkshpVPC
+      AvailabilityZone: !Ref AvailabilityZone
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: Private Subnet
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref AOSWorkshpVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref AOSWorkshpVPC
+      Tags:
+        - Key: Name
+          Value: Public Route Table
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # 2. S3 Bucket
+  MyS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: 
+        Fn::Join:
+          - '-'
+          - - Fn::Select:
+              - 2
+              - Fn::Split:
+                - '-'
+                - Fn::Select:
+                  - 2
+                  - Fn::Split:
+                    - '/'
+                    - !Ref 'AWS::StackId'
+            - !Ref 'AWS::AccountId'
+            - 'aosworkshop'
+
+  # 3. Amazon OpenSearch
+  # IAM Role for OpenSearch
+  OpenSearchAdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: es.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+      Path: /
+
+  OpenSearchDomain:
+    Type: AWS::OpenSearchService::Domain
+    Properties:
+      DomainName: aos-s3-zeroetl
+      EngineVersion: OpenSearch_2.13
+      ClusterConfig:
+        InstanceType: r6g.large.search
+        InstanceCount: 1
+        ZoneAwarenessEnabled: false
+      EBSOptions:
+        EBSEnabled: true
+        VolumeType: gp3
+        VolumeSize: 300
+      AccessPolicies:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: '*'
+            Action:
+              - es:*
+            Resource: !Sub arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/aos-s3-zeroetl/*
+      VPCOptions:
+        SubnetIds:
+          - !Ref PublicSubnet
+        SecurityGroupIds:
+          - !Ref OpenSearchSecurityGroup
+      AdvancedOptions:
+        rest.action.multi.allow_explicit_index: 'true'
+      EncryptionAtRestOptions:
+        Enabled: true
+      NodeToNodeEncryptionOptions:
+        Enabled: true
+      DomainEndpointOptions:
+        EnforceHTTPS: true
+        TLSSecurityPolicy: Policy-Min-TLS-1-2-2019-07
+      AdvancedSecurityOptions:
+        Enabled: true
+        InternalUserDatabaseEnabled: true
+        MasterUserOptions:
+          MasterUserName: admin
+          MasterUserPassword: Admin@aws123
+
+  OpenSearchSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow access to OpenSearch domain
+      VpcId: !Ref AOSWorkshpVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  # 4. EC2 Instance
+  # IAM Role for EC2
+  EC2S3Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Path: /
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EC2S3Role
+
+  AOSEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: ami-0ae8f15ae66fe8cda # Amazon Linux 2 AMI ID (us-east-1), please change for your region
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      Tags:
+        - Key: Name
+          Value: aosworkshopec2
+      UserData: !Base64
+        Fn::Sub: |
+          #!/bin/bash
+          sudo yum update -y
+          sudo yum install -y unzip aws-cli
+          # Download the zip file
+          wget https://github.com/ZackFairTS/warcdata/raw/main/warc.zip
+          # Unzip the file
+          unzip warc.zip
+          # Sync the data/ directory to S3
+          aws s3 sync data/ s3://${MyS3Bucket}/data/crawl=CC-MAIN-2023-40/subset=warc/
+
+          sudo yum install nginx -y
+          
+          # 配置Nginx
+          sudo cat > /tmp/opensearch.conf << EOL
+            server {
+              listen 443;
+              server_name _;
+
+              ssl_certificate /etc/pki/tls/certs/localhost.crt;
+              ssl_certificate_key /etc/pki/tls/private/localhost.key;
+
+              location / {
+                proxy_pass https://${OpenSearchDomain.DomainEndpoint};
+              }
+            }
+          EOL
+
+          sudo mv /tmp/opensearch.conf /etc/nginx/conf.d/opensearch.conf
+
+          # Generate a self-signed SSL certificate
+          sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+            -keyout /etc/pki/tls/private/localhost.key \
+            -out /etc/pki/tls/certs/localhost.crt \
+            -subj "/C=US/ST=State/L=City/O=Organization/CN=localhost"
+
+          # 启动Nginx
+          sudo systemctl enable nginx
+          sudo systemctl start nginx
+
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH and HTTP access
+      VpcId: !Ref AOSWorkshpVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref AOSWorkshpVPC
+  PublicSubnetId:
+    Description: Public Subnet ID
+    Value: !Ref PublicSubnet
+  PrivateSubnetId:
+    Description: Private Subnet ID
+    Value: !Ref PrivateSubnet
+  S3BucketName:
+    Description: S3 Bucket Name
+    Value: !Ref MyS3Bucket
+  OpenSearchDomainEndpoint:
+    Description: OpenSearch Domain Endpoint
+    Value: !GetAtt OpenSearchDomain.DomainEndpoint
+  EC2InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref AOSEC2Instance
