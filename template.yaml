@@ -210,10 +210,10 @@ Resources:
 
           sudo yum install nginx -y
           
-          # 配置Nginx
+          # configure Nginx
           sudo cat > /tmp/opensearch.conf << EOL
-            server {
-              listen 443;
+          server {
+              listen 443 ssl;
               server_name _;
 
               ssl_certificate /etc/pki/tls/certs/localhost.crt;
@@ -222,7 +222,7 @@ Resources:
               location / {
                 proxy_pass https://${OpenSearchDomain.DomainEndpoint};
               }
-            }
+          }
           EOL
 
           sudo mv /tmp/opensearch.conf /etc/nginx/conf.d/opensearch.conf
@@ -233,7 +233,7 @@ Resources:
             -out /etc/pki/tls/certs/localhost.crt \
             -subj "/C=US/ST=State/L=City/O=Organization/CN=localhost"
 
-          # 启动Nginx
+          # start Nginx
           sudo systemctl enable nginx
           sudo systemctl start nginx
 
